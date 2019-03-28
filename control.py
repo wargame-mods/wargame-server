@@ -15,7 +15,6 @@
 """
 
 from geoip import geolite2 # type: ignore
-from scapy.all import sniff, IP, TCP, Packet # type: ignore
 
 from typing import Tuple, Pattern, List, Iterable, Optional, Callable, Any, Dict, Match, IO
 import argparse
@@ -31,16 +30,17 @@ from math import floor
 from threading import Thread
 import collections
 import queue
+DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 
 #================================================================================#
 # environment parameters 
 #================================================================================#
-
 DEFAULT_RCON_PORT = '10842'
 DEFAULT_RCON_PATH = "/srv/wargame/wargame3_server/mcrcon/mcrcon"
 DEFAULT_RCON_PASSWORD = 'rcon_password'
 WARGAME_PORT = 10001
-SNIFF_IFACE = "eth0"
+DEFAULT_CHAT_PATH = "chat.txt"
+SERVER_LOG_PATH = "serverlog.txt"
 
 #================================================================================#
 # your specific lobby's parameters 
@@ -81,49 +81,19 @@ def update_game() -> None:
         game.update()
         time.sleep(0.25)
 
-def get_my_ip() -> str:
-    import socket
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(("8.8.8.8", 80))
-    ip = str((s.getsockname()[0]))
-    s.close()
-    return ip
-
-MY_IP: str = get_my_ip()
-
-def pkt_callback(pkt: Packet) -> None:
-    body = pkt.payload.payload.payload
-    if len(body) > 8:
-        bs = body.fields['load']
-        ip_src=pkt[IP].src
-        ip_dst=pkt[IP].dst
-        tcp_sport=pkt[TCP].sport
-        tcp_dport=pkt[TCP].dport
-        
-        is_incoming = MY_IP == str(ip_dst)
-        MSG_PREFIX_A = b'\x00\x24\xc2\xff\xff\xff\xffe\x01\x00\x00\x00\x18\x00'
-        #prefix = "[INCOMING (from " + ip_src + ")] " if is_incoming else "[OUTGOING (to " + ip_dst + ")] "        
-        # see: void pass_client_data_packet(), it creates a packet on channel 0xc2!!
-        if is_incoming and bs[2] == 0xc2:
-            if bs[len(MSG_PREFIX_A)] > 0x19 and bs[len(MSG_PREFIX_A) + 1] != 0:
-                try:
-                    msg = bs[len(MSG_PREFIX_A):].decode('utf-8')
-                    msg_q.put((ip_src, tcp_sport, str(msg)))
-                except UnicodeDecodeError:
-                    print('error decoding message: ' + str(bs))
-
-def sniff_traffic() -> None:
-    sniff(iface=SNIFF_IFACE, prn=pkt_callback, filter="tcp port " + str(WARGAME_PORT), store=0)
-            
-# start a thread that sniffs packet traffic and passes messages from players
-def rx_msgs() -> None:
+def parse_chat() -> None:
+    chatfile: IO[str] = open(DEFAULT_CHAT_PATH, "r", encoding="utf-8")
+    # read to the end of the file
+    chatfile.seek(0, 2) # seek to end of file
+    line_regex = re.compile('\[\d+\] (\d+): (.+)')
     while True:
-        item = msg_q.get()
-        if item is None:
-            break
-        (ip, port, msg) = item
-        game.on_player_message(ip, port, msg)
-        
+        line = chatfile.readline()
+        matched = line_regex.match(line)
+        if matched:
+            clientid = matched.group(1)
+            msg = matched.group(2)
+            game.on_player_message(clientid, msg)
+
 class Side(Enum):
     Bluefor = 0
     Redfor = 1
@@ -132,6 +102,7 @@ class GameState(Enum):
     Lobby = 1
     Game = 2
     Debriefing = 3
+    Deployment = 4
 
 class Player:
     """
@@ -312,11 +283,11 @@ class Game:
     def on_player_deck_set(self, playerid: str, playerdeck: str) -> None:
         pass
 
-    def on_player_message(self, ip: str, port: int, msg: str) -> None:
+    def on_player_message(self, client_id: str, msg: str) -> None:
         # find the player id
-        from_player = self.find_player_id_by_ip(ip, port)
+        from_player = self.players.get(client_id)
         if not from_player:
-            print('error: player not found for ip ' + ip + ':' + str(port))
+            print('error: player not found for id: ' + client_id)
             return
                     
         print('[' + str(from_player.get_id()) + ':' + from_player.get_name() + ']: ' + msg)
@@ -337,7 +308,7 @@ class Game:
             s = []
             for player in self.players.values():
                 match = geolite2.lookup(player.get_ip())
-                if match:
+                if match:                    
                     s.append(player.get_name() + ': ' + match.country)
             Server.send_message(', '.join(s))
 
@@ -362,6 +333,9 @@ class Game:
 
     def on_switch_to_debriefing(self) -> None:
         self.map_random_rotate()
+
+    def on_switch_to_deployment(self) -> None:
+        Server.send_message(LOBBY_RULES)
 
     def on_switch_to_lobby(self) -> None:
         pass
@@ -560,6 +534,13 @@ class Game:
         if not self.infoRun:
             self.on_switch_to_lobby()
 
+    # ----------------------------------------------
+    def _on_switch_to_deployment(self, match_obj: Match[str]) -> None:
+        self.gameState = GameState.Deployment
+
+        if not self.infoRun:
+            self.on_switch_to_deployment()
+            
     # ---------------------------------------------
     # Event handlers registration
     # ---------------------------------------------
@@ -573,6 +554,7 @@ class Game:
         self.register_event('Client ([0-9]+) variable PlayerName set to "(.*)"', self._on_player_name_change)
         self.register_event('Disconnecting client ([0-9]+)', self._on_player_disconnect)
         self.register_event('Entering in loading phase state', self._on_switch_to_game)
+        self.register_event('Entering in deploiement phase state', self._on_switch_to_deployment)        
         self.register_event('Entering in debriephing phase state', self._on_switch_to_debriefing)
         self.register_event('Entering in matchmaking state', self._on_switch_to_lobby)
 
@@ -584,7 +566,7 @@ class Game:
         self.events: Dict[Pattern[str], Callable[[Match[str]], None]] = {}
         self.players: Dict[str, Player] = {}
         self.gameState: GameState = GameState.Lobby
-        self.logfileStream: IO[str] = open("serverlog.txt", "r", encoding="utf-8")
+        self.logfileStream: IO[str] = open(SERVER_LOG_PATH, "r", encoding="utf-8")
         self.infoRun: bool = True
         self.register_events()
         self.currentMapId = -1
@@ -718,22 +700,22 @@ def main(args: argparse.Namespace) -> None:
     Rcon.rcon_port = args.rcon_port
     Rcon.rcon_path = args.rcon_path
     
-    sniff_thread = Thread(target = sniff_traffic)
+    sniff_thread = Thread(target = parse_chat)
     sniff_thread.start()
-    msg_thread = Thread(target = rx_msgs)
-    msg_thread.start()
     update_thread = Thread(target = update_game)
     update_thread.start()
     game.main()
 
 # globals
 game: Game = Game()
-msg_q: 'queue.Queue[Tuple[str, int, str]]' = queue.Queue()    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--rcon_port", help="rcon port number", default=DEFAULT_RCON_PORT)
     parser.add_argument("--rcon_path", help="rcon path", default=DEFAULT_RCON_PATH)
     parser.add_argument("--rcon_password", help="rcon password", default=DEFAULT_RCON_PASSWORD)
-    args = parser.parse_args()
+    parser.add_argument("--chat_path", help="path to the server chat log", default=DEFAULT_CHAT_PATH)
+    args = parser.parse_args() 
+    print('expecting to see server logs in :' + SERVER_LOG_PATH)
+    print('expecting to see chat logs in :' + DEFAULT_CHAT_PATH)
     main(args)
