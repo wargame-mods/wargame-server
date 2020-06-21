@@ -1,10 +1,12 @@
-## Update, June 12: Added another patch, enabled by default, that will skip version checking so that Mac/Linux clients can join dedicated servers even though they are stuck on the oldest version of Wargame. See https://www.reddit.com/r/wargame/comments/h0bl0h/patch_117427_teleportation_fix_bis/ for details.
+**Update, Jun 21**: Extended original patch so that "from client id" field is now available.
+
+**Update, June 12**: Added another patch, enabled by default, that will skip version checking so that Mac/Linux clients can join dedicated servers even though they are stuck on the oldest version of Wargame. See https://www.reddit.com/r/wargame/comments/h0bl0h/patch_117427_teleportation_fix_bis/ for details.
 
 One of the problems for the Wargame community is that there are some
 missing features for servers -- vote to kick, vote to rotate map, broadcast
 server rules, see stats about average strength of both teams compared, etc.
 
-I've added a new rcon command, `chat <client-id> <message>` which
+I've added a new rcon command, `chat <source-client-id> <client-id> <message>` which
 can be used to send a message to a specific client or broadcast to the entire
 lobby.
 
@@ -18,8 +20,7 @@ If you just want the "skip version checking" functionality, that's all you need 
 
 4. Run the control script: `python3.6 control.py --rcon_password=kslw48ajbscilljbnay219`
 5. If you have your own scripts, change your scripts to use the new rcon command
-     `chat <client-id> <message>` If client-id is -1 (0xffffff), the message
-     will be sent to all clients (this part is WIP).
+     `chat <source-client-id> <client-id> <message>` If source-client-id is not a real client, the lobby will display the user as "??????" (default). If client-id is -1 (0xffffff), the message will be sent to all clients (this part is WIP).
 6. For rx functionality, there is an undocumented command-line flag that logs all messages: 
      `+chat_log_file chat.txt`
 
